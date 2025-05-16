@@ -6,6 +6,7 @@ Run the APP:
 $ cd ~/weather_app
 $ source .venv/bin/activate
 $ sudo python -m display.scratch
+```
 
 # TODO:
 * Figure out which font to use. There are some Arial packages online
