@@ -57,7 +57,12 @@ class DisplayManager:
         self.draw.text((10, 10), f"KORH", font=self.font35, fill=0)
         self.draw_right_aligned_text(self.draw, "39m ago", 10, 10, self.font18)
 
-        self.draw_wind_barb(self.draw, 250, 50, 130, 270, scale=2)
+        self.draw_wind_barb(self.draw, 250, 50, 2, 270, scale=2)
+        self.draw_wind_barb(self.draw, 250, 120, 6, 270, scale=2)
+        self.draw_wind_barb(self.draw, 250, 190, 8, 270, scale=2)
+        self.draw_wind_barb(self.draw, 250, 260, 12, 270, scale=2)
+        self.draw_wind_barb(self.draw, 250, 330, 15, 270, scale=2)
+        self.draw_wind_barb(self.draw, 250, 400, 130, 270, scale=2)
 
 
         if not self.dev_mode:
@@ -126,6 +131,9 @@ class DisplayManager:
     def draw_wind_barb(self, draw, x, y, wind_speed, wind_direction, scale=1.0, color='black', line_width=2):
         """
         Draw a wind barb symbol on an image.
+
+        See:
+            https://www.weather.gov/hfo/windbarbinfo
         
         Args:
             draw: PIL ImageDraw object
@@ -140,7 +148,7 @@ class DisplayManager:
         # Handle calm wind (< 3 knots)
         if wind_speed < 3:
             # Draw a circle for calm wind
-            radius = int(8 * scale)
+            radius = int(6 * scale)
             bbox = [x - radius, y - radius, x + radius, y + radius]
             draw.ellipse(bbox, outline=color, width=line_width)
             return
@@ -153,7 +161,7 @@ class DisplayManager:
         # Base dimensions scaled
         staff_length = int(40 * scale)
         barb_length = int(15 * scale)
-        pennant_width = int(12 * scale)
+        pennant_width = int(15 * scale)
         
         # Calculate staff end points
         end_x = x + staff_length * math.cos(angle_rad)
@@ -164,18 +172,17 @@ class DisplayManager:
         
         # Calculate barb components
         speed_remaining = wind_speed
-        barb_spacing = 0.15  # Space between barbs as fraction of staff length
+        barb_spacing = 0.10  # Space between barbs as fraction of staff length
         
         # Start position depends on whether we have a 5-knot barb
         # If we have a 5-knot component, start further from tip to leave room for offset
-        has_five_knot = (speed_remaining % 10) >= 5
-        if has_five_knot:
-            barb_position = 0.7  # Start further from tip
+        if 3 < wind_speed < 8:
+            barb_position = 0.9  # Start further from tip
         else:
-            barb_position = 0.85  # Start closer to tip
+            barb_position = 1  # Start closer to tip
         
         # Calculate direction for barbs (45 degrees from the staff, to the right)
-        barb_angle = angle_rad - math.pi / 4  # 45 degrees instead of 90
+        barb_angle = angle_rad + math.pi / 2.5  # 45 degrees instead of 90
         
         # Draw pennants (50 knot flags) - flush with tip
         while speed_remaining >= 50:
@@ -200,7 +207,7 @@ class DisplayManager:
             barb_position -= barb_spacing
         
         # Draw full barbs (10 knot lines) - flush with tip
-        while speed_remaining >= 10:
+        while speed_remaining >= 8:
             pos_along_staff = barb_position
             staff_x = x + (end_x - x) * pos_along_staff
             staff_y = y + (end_y - y) * pos_along_staff
@@ -214,9 +221,9 @@ class DisplayManager:
             barb_position -= barb_spacing
         
         # Draw half barb (5 knot line) - offset from tip, closer to center
-        if speed_remaining >= 5:
+        if speed_remaining >= 3:
             # Half barb is positioned further back from the tip
-            pos_along_staff = barb_position - barb_spacing * 0.5  # Additional offset from other barbs
+            pos_along_staff = barb_position
             staff_x = x + (end_x - x) * pos_along_staff
             staff_y = y + (end_y - y) * pos_along_staff
             
