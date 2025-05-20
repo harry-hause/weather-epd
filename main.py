@@ -1,7 +1,11 @@
 import argparse
+import logging
+
 from display.display_manager import DisplayManager
 
 def main(dev_mode: bool):
+    print(f"--dev-mode: {dev_mode}")
+
     display_manager = DisplayManager(dev_mode=dev_mode)
     display_manager.render_display()
 
