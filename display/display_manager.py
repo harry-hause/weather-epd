@@ -1,10 +1,14 @@
 import math
+import os
 import time
 from pathlib import Path
 import logging
-from PIL import Image,ImageDraw,ImageFont
+from PIL import Image,ImageDraw,ImageFont, ImageChops
 
 logger = logging.getLogger()
+
+WIDTH = 800
+HEIGHT = 480
 
 class DisplayManager:
     def __init__(self, dev_mode=True):
@@ -31,8 +35,8 @@ class DisplayManager:
 
         return epd
 
-    def init_image(self, width: int = 800, height: int = 480):
-        return Image.new('1', (width, height), 255)
+    def init_image(self):
+        return Image.new('1', (WIDTH, HEIGHT), 255)
     
     def init_draw(self, image: Image):
         return ImageDraw.Draw(image)
@@ -55,14 +59,18 @@ class DisplayManager:
 
     def render_display(self):
         self.draw.text((10, 10), f"KORH", font=self.font35, fill=0)
-        self.draw_right_aligned_text(self.draw, "39m ago", 10, 10, self.font18)
+        self.draw_right_aligned_text("39m ago", 10, 10, self.font18)
 
-        self.draw_wind_barb(self.draw, 250, 50, 2, 270, scale=2)
-        self.draw_wind_barb(self.draw, 250, 120, 6, 270, scale=2)
-        self.draw_wind_barb(self.draw, 250, 190, 8, 270, scale=2)
-        self.draw_wind_barb(self.draw, 250, 260, 12, 270, scale=2)
-        self.draw_wind_barb(self.draw, 250, 330, 15, 270, scale=2)
-        self.draw_wind_barb(self.draw, 250, 400, 130, 270, scale=2)
+        self.draw_current_icon()
+
+
+        self.draw_wind_barb(60, 200, 15, 120, scale=2)
+        self.draw.line([(0, 400), (WIDTH, 400)], fill='black', width=2)
+        # self.draw_wind_barb(120, 300, 5, 270, scale=2)
+        # self.draw_wind_barb(200, 200, 10, 270, scale=2)
+        # self.draw_wind_barb(300, 300, 25, 360, scale=2)
+        # self.draw_wind_barb(350, 330, 65, 180, scale=2)
+        # self.draw_wind_barb(500, 400, 45, 200, scale=2)
 
 
         if not self.dev_mode:
@@ -70,12 +78,12 @@ class DisplayManager:
             time.sleep(20)
         else: self.save_display_preview('weather_preview.png')
 
-    def draw_right_aligned_text(self, draw, text, y, margin, font, fill=0):
+    def draw_right_aligned_text(self, text, y, margin, font, fill=0):
         """Draw text right-aligned with a consistent margin"""
-        text_width, text_height = self.get_text_size(draw, text, font=font)
+        text_width, text_height = self.get_text_size(self.draw, text, font=font)
         x = self.image.width - text_width - margin
         # Draw the text
-        draw.text((x, y), text, font=font, fill=fill)
+        self.draw.text((x, y), text, font=font, fill=fill)
         return y + text_height
 
     def save_display_preview(self, filename=None, scale=2):
@@ -127,107 +135,173 @@ class DisplayManager:
         print(f"Preview saved to: {filename}")
         
         return filename
+    
+    def draw_current_icon(self):
+        picdir = Path(__file__).resolve().parent / 'pic' / 'wi-cloud.bmp'
+        self.scale_and_display_bmp(picdir, position=(0, 50))
+        self.draw.text((10, 120), 'Cloudy', font=self.font24)
 
-    def draw_wind_barb(self, draw, x, y, wind_speed, wind_direction, scale=1.0, color='black', line_width=2):
+        return
+    
+    def scale_and_display_bmp(self, bmp_path, position=(0, 0), scale_factor=.9, 
+                          inverted=False):
         """
-        Draw a wind barb symbol on an image.
-
-        See:
-            https://www.weather.gov/hfo/windbarbinfo
+        Scales a BMP icon and adds it to an image.
         
         Args:
-            draw: PIL ImageDraw object
-            x, y: Center position of the wind barb
+            bmp_path: Path to the BMP file
+            position: Tuple (x, y) for positioning the icon on the display
+            scale_factor: Factor to scale the icon (1.0 = original size)
+            inverted: If True, invert the colors (black becomes white and vice versa)
+            update_display: If True, immediately update the display
+        
+        Returns:
+            The PIL Image with the icon added
+        """
+        # Check if the file exists
+        if not os.path.exists(bmp_path):
+            raise FileNotFoundError(f"BMP file not found: {bmp_path}")
+        
+        # Open the BMP file
+        original_image = Image.open(bmp_path)
+        
+        # Calculate the new dimensions
+        width, height = original_image.size
+        new_width = int(width * scale_factor)
+        new_height = int(height * scale_factor)
+        
+        # Scale the image using high-quality resampling
+        if scale_factor != 1.0:
+            scaled_image = original_image.resize((new_width, new_height), Image.LANCZOS)
+        else:
+            scaled_image = original_image
+        
+        # Convert to 1-bit mode for e-ink display if needed
+        if scaled_image.mode != '1':
+            scaled_image = scaled_image.convert('1')
+        
+        # Invert if requested
+        if inverted:
+            scaled_image = ImageChops.invert(scaled_image)
+        
+        # Paste the scaled icon at the specified position
+        self.image.paste(scaled_image, position)
+
+    def draw_wind_barb(self, center_x, center_y, wind_speed, wind_direction, scale=1.0, 
+                    color='black', line_width=3, barb_angle=290):
+        """
+        Draw a wind barb symbol centered at a specific point.
+        Barbs are drawn at a specified angle from the staff.
+        
+        Args:
+            center_x, center_y: Center position of the wind barb
             wind_speed: Wind speed in knots
             wind_direction: Wind direction in degrees (0-360, where 0/360 is North)
             scale: Scale factor for the barb size (default 1.0)
             color: Color of the barb lines (default 'black')
             line_width: Width of the barb lines (default 2)
+            barb_angle: Angle of barbs from staff in degrees (default 45)
+                        0 = along staff, 90 = perpendicular to staff
+                        Positive = counterclockwise from staff (left side)
+                        Negative = clockwise from staff (right side)
         """
         
         # Handle calm wind (< 3 knots)
         if wind_speed < 3:
             # Draw a circle for calm wind
             radius = int(6 * scale)
-            bbox = [x - radius, y - radius, x + radius, y + radius]
-            draw.ellipse(bbox, outline=color, width=line_width)
+            bbox = [center_x - radius, center_y - radius, center_x + radius, center_y + radius]
+            self.draw.ellipse(bbox, outline=color, width=line_width)
             return
-        
-        # Convert wind direction to radians
-        # Wind direction is "from" direction, so we add 180° to get "to" direction for barb orientation
-        # Also convert from meteorological (0° = North, clockwise) to mathematical (0° = East, counterclockwise)
-        angle_rad = math.radians(90 - wind_direction)
         
         # Base dimensions scaled
         staff_length = int(40 * scale)
         barb_length = int(15 * scale)
         pennant_width = int(15 * scale)
         
-        # Calculate staff end points
-        end_x = x + staff_length * math.cos(angle_rad)
-        end_y = y - staff_length * math.sin(angle_rad)
+        # Convert wind direction to radians
+        # Wind direction is "from" direction, so we need to reverse it for the barb
+        # Also convert from meteorological (0° = North, clockwise) to mathematical (0° = East, counterclockwise)
+        staff_angle_rad = math.radians(90 - wind_direction)
+        
+        # Calculate staff start and end points from center
+        # Staff is centered at the specified coordinates
+        start_x = center_x - (staff_length / 2) * math.cos(staff_angle_rad)
+        start_y = center_y + (staff_length / 2) * math.sin(staff_angle_rad)
+        end_x = center_x + (staff_length / 2) * math.cos(staff_angle_rad)
+        end_y = center_y - (staff_length / 2) * math.sin(staff_angle_rad)
         
         # Draw the staff (main line)
-        draw.line([(x, y), (end_x, end_y)], fill=color, width=line_width)
+        self.draw.line([(start_x, start_y), (end_x, end_y)], fill=color, width=line_width)
+        
+        # Calculate the unit vector along the staff (direction of wind)
+        staff_unit_x = math.cos(staff_angle_rad)
+        staff_unit_y = -math.sin(staff_angle_rad)
+        
+        # Convert barb angle to radians
+        barb_angle_rad = math.radians(barb_angle)
+        
+        # Calculate barb direction by adding the barb angle to the staff angle
+        barb_direction_rad = staff_angle_rad + barb_angle_rad
+
+        # Calculate unit vectors for the barb direction
+        barb_unit_x = math.cos(barb_direction_rad)
+        barb_unit_y = -math.sin(barb_direction_rad)
         
         # Calculate barb components
         speed_remaining = wind_speed
-        barb_spacing = 0.10  # Space between barbs as fraction of staff length
+        barb_spacing = 0.1 * staff_length  # Fixed spacing in pixels
         
-        # Start position depends on whether we have a 5-knot barb
-        # If we have a 5-knot component, start further from tip to leave room for offset
+        # Position along staff for barbs (start near the end and work backward)
         if 3 < wind_speed < 8:
-            barb_position = 0.9  # Start further from tip
+            barb_start_offset = int(5 * scale)  # Small offset from the very end
         else:
-            barb_position = 1  # Start closer to tip
+            barb_start_offset = 0
         
-        # Calculate direction for barbs (45 degrees from the staff, to the right)
-        barb_angle = angle_rad + math.pi / 2.5  # 45 degrees instead of 90
+        # Initial position for first barb
+        current_x = end_x - barb_start_offset * staff_unit_x
+        current_y = end_y - barb_start_offset * staff_unit_y
         
-        # Draw pennants (50 knot flags) - flush with tip
+        # Draw pennants (50 knot flags)
         while speed_remaining >= 50:
-            pos_along_staff = barb_position
-            staff_x = x + (end_x - x) * pos_along_staff
-            staff_y = y + (end_y - y) * pos_along_staff
+            # Pennant tip (at specified angle from staff)
+            tip_x = current_x + pennant_width * barb_unit_x
+            tip_y = current_y + pennant_width * barb_unit_y
             
-            # Pennant tip
-            tip_x = staff_x + pennant_width * math.cos(barb_angle)
-            tip_y = staff_y + pennant_width * math.sin(barb_angle)
-            
-            # Pennant base (slightly back along staff)
-            base_pos = pos_along_staff - barb_spacing * 0.7
-            base_x = x + (end_x - x) * base_pos
-            base_y = y + (end_y - y) * base_pos
+            # Base of pennant (back along staff)
+            base_x = current_x - (barb_spacing * 0.8) * staff_unit_x
+            base_y = current_y - (barb_spacing * 0.8) * staff_unit_y
             
             # Draw filled triangle for pennant
-            points = [(staff_x, staff_y), (tip_x, tip_y), (base_x, base_y)]
-            draw.polygon(points, fill=color)
+            self.draw.polygon([(current_x, current_y), (tip_x, tip_y), (base_x, base_y)], fill=color)
+            
+            # Move position back along staff for next barb
+            current_x -= barb_spacing * staff_unit_x * 1.2
+            current_y -= barb_spacing * staff_unit_y * 1.2
             
             speed_remaining -= 50
-            barb_position -= barb_spacing
         
-        # Draw full barbs (10 knot lines) - flush with tip
-        while speed_remaining >= 8:
-            pos_along_staff = barb_position
-            staff_x = x + (end_x - x) * pos_along_staff
-            staff_y = y + (end_y - y) * pos_along_staff
+        # Draw full barbs (10 knot lines)
+        while speed_remaining >= 10:
+            # Calculate barb end point (at specified angle from staff)
+            barb_end_x = current_x + barb_length * barb_unit_x
+            barb_end_y = current_y + barb_length * barb_unit_y
             
-            barb_end_x = staff_x + barb_length * math.cos(barb_angle)
-            barb_end_y = staff_y + barb_length * math.sin(barb_angle)
+            # Draw the barb
+            self.draw.line([(current_x, current_y), (barb_end_x, barb_end_y)], fill=color, width=line_width)
             
-            draw.line([(staff_x, staff_y), (barb_end_x, barb_end_y)], fill=color, width=line_width)
+            # Move position back along staff for next barb
+            current_x -= barb_spacing * staff_unit_x
+            current_y -= barb_spacing * staff_unit_y
             
             speed_remaining -= 10
-            barb_position -= barb_spacing
         
-        # Draw half barb (5 knot line) - offset from tip, closer to center
-        if speed_remaining >= 3:
-            # Half barb is positioned further back from the tip
-            pos_along_staff = barb_position
-            staff_x = x + (end_x - x) * pos_along_staff
-            staff_y = y + (end_y - y) * pos_along_staff
+        # Draw half barb (5 knot line)
+        if speed_remaining >= 5:
+            # Calculate half-barb end point (at specified angle from staff, half length)
+            half_barb_end_x = current_x + (barb_length / 2) * barb_unit_x
+            half_barb_end_y = current_y + (barb_length / 2) * barb_unit_y
             
-            half_barb_end_x = staff_x + (barb_length / 2) * math.cos(barb_angle)
-            half_barb_end_y = staff_y + (barb_length / 2) * math.sin(barb_angle)
-            
-            draw.line([(staff_x, staff_y), (half_barb_end_x, half_barb_end_y)], fill=color, width=line_width)
+            # Draw the half-barb
+            self.draw.line([(current_x, current_y), (half_barb_end_x, half_barb_end_y)], 
+                        fill=color, width=line_width)
