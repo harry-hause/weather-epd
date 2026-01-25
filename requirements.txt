@@ -4,3 +4,5 @@ pillow==11.2.1
 RPi.GPIO==0.7.1
 setuptools==80.7.1
 spidev==3.7
+requests
+pandas
