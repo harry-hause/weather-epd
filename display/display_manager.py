@@ -518,15 +518,15 @@ class DisplayManager:
         cells = [
             # Column 1
             { 'big': 'LIFR', 'label': 'FLIGHT CATEGORY', 'sub': '' },
-            { 'big': "5\u00b0F (-15\u00b0C)", 'label': 'TEMPERATURE', 'sub': '' },
-            { 'big': "2\u00b0F / 85%", 'label': 'DEWPT/HUMIDITY', 'sub': '' },
-            # Column 2
             { 'big': "500'", 'label': 'CEILING', 'sub': '' },
-            { 'big': "044\u00b0 @ 10-19", 'label': 'WIND (KTS)', 'sub': '' },
-            { 'big': "-2,833'", 'label': 'DENSITY ALT', 'sub': '' },
-            # Column 3
             { 'big': '0.5 sm', 'label': 'VISIBILITY', 'sub': '' },
+            # Column 2
+            { 'big': "5\u00b0F (-15\u00b0C)", 'label': 'TEMPERATURE', 'sub': '' },
+            { 'big': "044\u00b0 @ 10-19", 'label': 'WIND (KTS)', 'sub': '' },
             { 'big': '30.21', 'label': 'ALTIMETER', 'sub': '' },
+            # Column 3
+            { 'big': "2\u00b0F / 85%", 'label': 'DEWPT/HUMIDITY', 'sub': '' },
+            { 'big': "-2,833'", 'label': 'DENSITY ALT', 'sub': '' },
             { 'big': '99% (1.0")', 'label': 'SNOW', 'sub': '' },
         ]
 
