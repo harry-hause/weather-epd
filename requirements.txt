@@ -6,3 +6,5 @@ setuptools==80.7.1
 spidev==3.7
 requests
 pandas
+pytest
+cairosvg  # only needed to run scripts/fetch_icons.py

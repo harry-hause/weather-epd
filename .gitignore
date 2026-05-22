@@ -137,3 +137,5 @@ eink_previews/
 secrets.json
 config.local.ini
 *.bak
+
+raw_data/
