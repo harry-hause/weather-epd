@@ -16,6 +16,7 @@ class WeatherData:
     temp_f: float | None
     dewpoint_f: float | None
     wind_dir_deg: int | None
+    wind_variable: bool
     wind_speed_kt: int | None
     wind_gust_kt: int | None
     visibility_sm: float | None

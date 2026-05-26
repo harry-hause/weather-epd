@@ -179,12 +179,13 @@ class NWSWeatherWrapper:
                     if value is not None:
                         value = self.kmh_to_knots(value)
 
-                # Ceiling height: m → ft; negative = NWS "clear/unlimited" encoding
+                # Ceiling height: m → ft.
+                # NWS uses negative OR 18,288 m (60,000 ft) as "clear/unlimited" sentinels.
                 if is_meters and key == 'ceilingHeight':
-                    if value is not None and value >= 0:
+                    if value is not None and 0 <= value < 18288:
                         value = self.meters_to_feet(value)
                     else:
-                        value = float('inf')
+                        value = None
 
                 # Visibility: m → statute miles
                 if is_meters and key == 'visibility':
@@ -244,7 +245,16 @@ class NWSWeatherWrapper:
         dewp_c = metar.get('dewp') if metar.get('dewp') is not None else metar.get('dwpt')
         dewpoint_f = self.celsius_to_fahrenheit(dewp_c) if dewp_c is not None else None
 
-        wind_dir = metar.get('wdir')
+        wind_dir_raw = metar.get('wdir')
+        wind_variable = False
+        if isinstance(wind_dir_raw, str):
+            try:
+                wind_dir = int(wind_dir_raw)
+            except ValueError:
+                wind_dir = None
+                wind_variable = wind_dir_raw.upper() == "VRB"
+        else:
+            wind_dir = wind_dir_raw
         wind_speed = metar.get('wspd')
         wind_gust = metar.get('wgst')
 
@@ -259,7 +269,7 @@ class NWSWeatherWrapper:
         ceiling = self._metar_ceiling(clouds)
 
         obs_time = self._parse_obs_time(metar.get('obsTime') or metar.get('reportTime'))
-        wx_condition = self._wx_condition(metar, nws_obs)
+        wx_condition_fallback = self._wx_condition(metar, nws_obs)
 
         da = None
         if temp_f is not None and altimeter_inhg is not None:
@@ -315,6 +325,15 @@ class NWSWeatherWrapper:
                     lambda t: 6 <= t.to_pydatetime().astimezone().hour < 20
                 )
 
+        # --- wx_condition from hourly shortForecast so icon matches the hourly grid ---
+        wx_condition = wx_condition_fallback
+        if not hourly_df.empty and 'shortForecast' in hourly_df.columns:
+            now_utc = datetime.now(tz=timezone.utc)
+            future = hourly_df[hourly_df.index >= now_utc]['shortForecast'].dropna()
+            future = future[future != '']
+            if not future.empty:
+                wx_condition = future.iloc[0]
+
         # --- daily periods ---
         daily_periods = summary.get('properties', {}).get('periods', []) or []
 
@@ -341,6 +360,7 @@ class NWSWeatherWrapper:
             temp_f=temp_f,
             dewpoint_f=dewpoint_f,
             wind_dir_deg=wind_dir,
+            wind_variable=wind_variable,
             wind_speed_kt=wind_speed,
             wind_gust_kt=wind_gust,
             visibility_sm=visibility_sm,
@@ -364,7 +384,7 @@ class NWSWeatherWrapper:
             cover = layer.get('cover', '')
             base = layer.get('base')
             if cover in ('BKN', 'OVC') and base is not None:
-                base_ft = base * 100
+                base_ft = base
                 if ceiling is None or base_ft < ceiling:
                     ceiling = base_ft
         return ceiling

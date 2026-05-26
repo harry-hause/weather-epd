@@ -4,6 +4,9 @@ import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+EASTERN = ZoneInfo("America/New_York")
 from pathlib import Path
 import logging
 
@@ -74,40 +77,27 @@ def _period_end_utc(p: dict) -> datetime | None:
 
 
 def _compute_time_window(periods: list, now_utc: datetime) -> tuple[datetime, datetime]:
-    """Return (window_start, window_end) for the display.
+    """Return (window_start, window_end) snapped to local calendar-day (midnight) boundaries.
 
-    window_start = first period's endTime minus reference duration, so today's column
-                   starts at 6am even when NWS truncates startTime to the current hour.
-    window_end   = last period's startTime + 24h so all day columns are equal-width
-                   (each column spans from one period's start to the next, including night).
+    window_start = midnight of today (Eastern)
+    window_end   = midnight of (last period's local date + 1 day)
     """
+    today_midnight = now_utc.astimezone(EASTERN).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    window_start = today_midnight.astimezone(timezone.utc)
+
     if not periods:
-        return now_utc, now_utc + timedelta(hours=24)
+        return window_start, window_start + timedelta(days=7)
 
-    # window_start: pad back from first period's end so today gets a full-width column
-    first_end = _period_end_utc(periods[0])
-    if first_end:
-        ref_secs = 0
-        for p in periods[1:]:
-            ps, pe = _period_start_utc(p), _period_end_utc(p)
-            if ps and pe:
-                ref_secs = max(ref_secs, (pe - ps).total_seconds())
-                break
-        if ref_secs == 0:
-            first_start = _period_start_utc(periods[0])
-            ref_secs = (first_end - first_start).total_seconds() if first_start else 43200
-        window_start = first_end - timedelta(seconds=ref_secs)
-    else:
-        window_start = _period_start_utc(periods[0]) or now_utc
-
-    # window_end: last period's startTime + 24h so the last column is the same width as others
     last_start = _period_start_utc(periods[-1])
     if last_start:
-        window_end = last_start + timedelta(hours=24)
+        last_date = last_start.astimezone(EASTERN).date()
+        last_midnight = datetime(last_date.year, last_date.month, last_date.day,
+                                  tzinfo=EASTERN) + timedelta(days=1)
+        window_end = last_midnight.astimezone(timezone.utc)
     else:
-        last_end = _period_end_utc(periods[-1])
-        window_end = last_end if (last_end and last_end > now_utc) else \
-            now_utc + timedelta(hours=max(24, len(periods) * 12))
+        window_end = window_start + timedelta(days=7)
 
     return window_start, window_end
 
@@ -148,8 +138,6 @@ class DisplayManager:
     def init_display(self):
         from display.epd_interface import EPD
         epd = EPD()
-        logger.info("Init EPD display")
-        epd.init()
         return epd
 
     def init_image(self):
@@ -163,7 +151,7 @@ class DisplayManager:
         self.font24 = ImageFont.truetype(str(picdir / 'Font.ttc'), 24)
         self.font18 = ImageFont.truetype(str(picdir / 'Font.ttc'), 18)
         self.font35 = ImageFont.truetype(str(picdir / 'Font.ttc'), 35)
-        self.font12 = ImageFont.truetype(str(picdir / 'Font.ttc'), 12)
+        self.font12 = ImageFont.truetype(str(picdir / 'Font.ttc'), 14)
 
     def get_text_size(self, draw, text, font):
         if hasattr(draw, 'textbbox'):
@@ -198,12 +186,14 @@ class DisplayManager:
         filtered_periods = _filter_daily_periods(data.daily_periods)
         now_utc = datetime.now(tz=timezone.utc)
         window_start, window_end = _compute_time_window(filtered_periods, now_utc)
-        self.draw_daily_grid(filtered_periods, window_start, window_end)
-        self.draw_flight_category_bar(data.hourly_df, window_start, window_end, flight_band_height=20)
+        self.draw_daily_grid(filtered_periods, window_start, window_end, hourly_df=data.hourly_df)
 
         if not self.dev_mode:
+            logger.info("Init EPD")
+            self.epd.init()
             self.epd.display(self.epd.getbuffer(self.image))
-            time.sleep(20)
+            logger.info("EPD sleep")
+            self.epd.sleep()
         else:
             self.save_display_preview('weather_preview.png')
 
@@ -217,7 +207,7 @@ class DisplayManager:
         return f"{mins // 60}h {mins % 60}m ago"
 
     def draw_current_time(self, obs_time: datetime, center_x: int = None):
-        local_dt = obs_time.astimezone() if isinstance(obs_time, datetime) else obs_time.to_pydatetime().astimezone()
+        local_dt = obs_time.astimezone(EASTERN) if isinstance(obs_time, datetime) else obs_time.to_pydatetime().astimezone(EASTERN)
         text = local_dt.strftime("%A, %b %-d, %H:%M %Z")
 
         font = self.font18
@@ -229,6 +219,53 @@ class DisplayManager:
         y = 10
         self.draw.text((x, y), text, font=font, fill=0)
         return y + text_h
+
+    def _is_night_now(self) -> bool:
+        """Return True if the current local time is between sunset and sunrise."""
+        try:
+            from astral import LocationInfo
+            from astral.sun import sun as astral_sun
+            observer = LocationInfo(latitude=42.2673, longitude=-71.8752).observer
+            now = datetime.now(tz=EASTERN)
+            s = astral_sun(observer, date=now.date(), tzinfo=EASTERN)
+            return not (s['sunrise'] <= now <= s['sunset'])
+        except Exception:
+            return False
+
+    def _get_sun_events(self, rows: list) -> list:
+        """Return list parallel to rows; each entry is None or ('rise'/'set', datetime)."""
+        try:
+            from astral import LocationInfo
+            from astral.sun import sun as astral_sun
+        except ImportError:
+            return [None] * len(rows)
+
+        observer = LocationInfo(latitude=42.2673, longitude=-71.8752).observer
+
+        dates = set()
+        for row in rows:
+            if row is not None:
+                dates.add(row.name.to_pydatetime().astimezone(EASTERN).date())
+
+        all_events = []
+        for d in dates:
+            s = astral_sun(observer, date=d, tzinfo=EASTERN)
+            all_events.append(('rise', s['sunrise']))
+            all_events.append(('set', s['sunset']))
+
+        result = []
+        for row in rows:
+            if row is None:
+                result.append(None)
+                continue
+            ts = row.name.to_pydatetime()
+            end = ts + timedelta(hours=1)
+            match = next(
+                (ev for ev in all_events if ts <= ev[1] < end),
+                None,
+            )
+            result.append(match)
+        return result
 
     def draw_hourly_grid(self, hourly_df: pd.DataFrame):
         top_y = 210
@@ -249,6 +286,8 @@ class DisplayManager:
         else:
             rows = [None] * num_boxes
 
+        sun_events = self._get_sun_events(rows)
+
         for i, row in enumerate(rows):
             left = int(round(i * WIDTH / num_boxes))
             right = int(round((i + 1) * WIDTH / num_boxes))
@@ -257,14 +296,15 @@ class DisplayManager:
             inner_x = left + padding
             inner_w = cell_w - padding * 2
             inner_h = bottom_y - top_y - padding * 2
-            self.draw_hourly_block(inner_x, top_y + padding, inner_w, inner_h, row)
+            self.draw_hourly_block(inner_x, top_y + padding, inner_w, inner_h, row, sun_event=sun_events[i])
 
-    def draw_daily_grid(self, daily_periods: list, window_start: datetime = None, window_end: datetime = None):
+    def draw_daily_grid(self, daily_periods: list, window_start: datetime = None,
+                        window_end: datetime = None, hourly_df: pd.DataFrame = None):
         top_y = 375
         self.draw.line([(0, top_y), (WIDTH, top_y)], fill='black', width=2)
 
         flight_band_height = 20
-        bottom_y = HEIGHT - flight_band_height
+        band_top = HEIGHT - flight_band_height  # 460
         padding = 6
 
         periods = list(daily_periods or [])
@@ -275,41 +315,45 @@ class DisplayManager:
         if window_start is None or window_end is None:
             window_start, window_end = _compute_time_window(periods, now_utc)
 
-        has_timestamps = all(
-            _period_start_utc(p) is not None and _period_end_utc(p) is not None
-            for p in periods
-        )
+        # Each period maps to its calendar-day column: local midnight → midnight
+        columns = []
+        for i, period in enumerate(periods):
+            period_start = _period_start_utc(period)
+            if period_start:
+                col_date = period_start.astimezone(EASTERN).date()
+            else:
+                col_date = (now_utc + timedelta(days=i)).astimezone(EASTERN).date()
+            col_start = datetime(col_date.year, col_date.month, col_date.day,
+                                  tzinfo=EASTERN).astimezone(timezone.utc)
+            col_end = col_start + timedelta(days=1)
+            x0 = _time_to_x(col_start, window_start, window_end)
+            x1 = _time_to_x(col_end, window_start, window_end)
+            columns.append((x0, x1, col_start, col_end))
 
-        if has_timestamps:
-            for i, period in enumerate(periods):
-                # First period anchors to window_start (NWS may truncate Today's startTime
-                # to the current hour; we pad it back so Today fills from x=0).
-                effective_start = window_start if i == 0 else _period_start_utc(period)
-                # Column extends to the NEXT period's start (not this period's end), so
-                # each column spans 24h and includes the overnight gap — equal-width columns.
-                if i + 1 < len(periods):
-                    next_start = _period_start_utc(periods[i + 1])
-                    effective_end = next_start if next_start else window_end
-                else:
-                    effective_end = window_end
-                x0 = _time_to_x(effective_start, window_start, window_end)
-                x1 = _time_to_x(effective_end, window_start, window_end)
-                if i < len(periods) - 1:
-                    self.draw.line([(x1, top_y), (x1, bottom_y)], fill='black', width=2)
-                cell_w = x1 - x0
-                if cell_w > padding * 2:
-                    self.draw_daily_block(x0 + padding, top_y + padding, cell_w - padding * 2, bottom_y - top_y - padding * 2, period)
-        else:
-            num = len(periods)
-            for i, period in enumerate(periods):
-                x0 = int(i * WIDTH / num)
-                x1 = int((i + 1) * WIDTH / num)
-                if i < num - 1:
-                    self.draw.line([(x1, top_y), (x1, bottom_y)], fill='black', width=2)
-                cell_w = x1 - x0
-                self.draw_daily_block(x0 + padding, top_y + padding, cell_w - padding * 2, bottom_y - top_y - padding * 2, period)
+        # Determine if today's column should use night icons (after sunset)
+        today_is_night = self._is_night_now()
+        today_date = now_utc.astimezone(EASTERN).date()
 
-    def draw_daily_block(self, x, y, w, h, period: dict | None):
+        # Draw day block content (dividers drawn last so they sit on top of band fills)
+        for period, (x0, x1, col_start, col_end) in zip(periods, columns):
+            cell_w = x1 - x0
+            if cell_w > padding * 2:
+                col_date = col_start.astimezone(EASTERN).date()
+                is_night = today_is_night and col_date == today_date
+                self.draw_daily_block(x0 + padding, top_y + padding,
+                                       cell_w - padding * 2, band_top - top_y - padding * 2, period,
+                                       is_night=is_night)
+
+        # Flight category band — fills rendered before column dividers
+        self._draw_flight_band(hourly_df, columns, window_start, window_end,
+                                flight_band_height, now_utc)
+
+        # Column dividers span the day grid only; flight band is a continuous bar
+        for i, (x0, x1, col_start, col_end) in enumerate(columns):
+            if i < len(columns) - 1:
+                self.draw.line([(x1, top_y), (x1, band_top)], fill='black', width=2)
+
+    def draw_daily_block(self, x, y, w, h, period: dict | None, is_night: bool = False):
         if period is None:
             return
 
@@ -323,8 +367,8 @@ class DisplayManager:
         label_x = x + (w - label_w) // 2
         self.draw.text((label_x, y), name, font=label_font, fill=0)
 
-        icon_top = y + label_h + 2
-        icon_path = str(get_icon_path(forecast))
+        icon_top = y + label_h + 4
+        icon_path = str(get_icon_path(forecast, is_night=is_night))
         try:
             orig = Image.open(icon_path)
             ow, oh = orig.size
@@ -341,10 +385,10 @@ class DisplayManager:
             temp_text = f"{temp}°{temp_unit}"
             t_w, t_h = self.get_text_size(self.draw, temp_text, font=label_font)
             t_x = x + (w - t_w) // 2
-            t_y = y + h - t_h - 2
+            t_y = y + h - t_h - 4
             self.draw.text((t_x, t_y), temp_text, font=label_font, fill=0)
 
-    def draw_hourly_block(self, x, y, w, h, row: pd.Series | None):
+    def draw_hourly_block(self, x, y, w, h, row: pd.Series | None, sun_event=None):
         if row is None:
             return
 
@@ -354,7 +398,7 @@ class DisplayManager:
         cursor_y = y + 2  # 2px top margin above time label
 
         # Hour label (local time) — convert Timestamp → datetime for astimezone()
-        local_dt = row.name.to_pydatetime().astimezone()
+        local_dt = row.name.to_pydatetime().astimezone(EASTERN)
         hour_label = local_dt.strftime("%-H:%M")
         hw, hh = self.get_text_size(self.draw, hour_label, font=small_font)
         self.draw.text((int(center_x - hw // 2), cursor_y), hour_label, font=small_font, fill=0)
@@ -362,10 +406,11 @@ class DisplayManager:
 
         cat = row.get('flightCategory') or 'VFR'
 
-        # Icon from shortForecast — 20px top margin above icon
-        cursor_y += 20
+        # Weather icon
+        cursor_y += 8
         forecast = row.get('shortForecast') or ''
-        icon_path = str(get_icon_path(forecast))
+        is_night = not bool(row.get('isDaytime', True))
+        icon_path = str(get_icon_path(forecast, is_night=is_night))
         try:
             orig = Image.open(icon_path)
             ow, oh = orig.size
@@ -383,6 +428,29 @@ class DisplayManager:
             )
             cursor_y = icon_cy + icon_r + spacing
 
+        # Sunrise/sunset indicator below the weather icon
+        if sun_event is not None:
+            ev_type, ev_time = sun_event
+            # picdir = Path(__file__).resolve().parent / 'pic'
+            # icon_file = 'wi-sunrise.bmp' if ev_type == 'rise' else 'wi-sunset.bmp'
+            # sun_icon_path = str(picdir / icon_file)
+            # sun_icon_size = 18
+            # try:
+            #     orig = Image.open(sun_icon_path)
+            #     ow, oh = orig.size
+            #     sun_scale = sun_icon_size / max(ow, oh)
+            #     sun_iw, sun_ih = int(ow * sun_scale), int(oh * sun_scale)
+            #     ix = int(center_x - sun_iw // 2)
+            #     self.scale_and_display_bmp(sun_icon_path, position=(max(0, ix), cursor_y), scale_factor=sun_scale)
+            #     cursor_y += sun_ih + 1
+            # except Exception:
+            #     pass
+            ev_label = ev_time.astimezone(EASTERN).strftime("%-H:%M")
+            ew, eh = self.get_text_size(self.draw, ev_label, font=small_font)
+            cursor_y -= 6
+            self.draw.text((int(center_x - ew // 2), cursor_y), ev_label, font=small_font, fill=0)
+            cursor_y += eh + spacing
+
         # Build the bottom-pinned text block: cat, wind dir, wind speed, temp, precip
         wind_dir = row.get('windDirection')
         wind_spd = row.get('windSpeed')
@@ -390,14 +458,15 @@ class DisplayManager:
         temp = row.get('temperature')
         precip = row.get('precipChance')
 
+        # bottom_lines entries: (text, w, h, icon_path_or_None)
         bottom_lines = []
         cat_w, cat_h = self.get_text_size(self.draw, cat, font=small_font)
-        bottom_lines.append((cat, cat_w, cat_h))
+        bottom_lines.append((cat, cat_w, cat_h, None))
 
         if wind_dir is not None and not _is_nan(wind_dir):
             wd_text = f"{int(wind_dir):03d}°"
             wd_w, wd_h = self.get_text_size(self.draw, wd_text, font=small_font)
-            bottom_lines.append((wd_text, wd_w, wd_h))
+            bottom_lines.append((wd_text, wd_w, wd_h, None))
 
         if wind_spd is not None and not _is_nan(wind_spd):
             if wind_gst is not None and not _is_nan(wind_gst) and int(wind_gst) > 10:
@@ -405,66 +474,80 @@ class DisplayManager:
             else:
                 wind_text = f"{int(wind_spd)} kts"
             w_w, w_h = self.get_text_size(self.draw, wind_text, font=small_font)
-            bottom_lines.append((wind_text, w_w, w_h))
+            bottom_lines.append((wind_text, w_w, w_h, None))
 
         if temp is not None and not _is_nan(temp):
             temp_text = f"{round(temp)}°F"
             t_w, t_h = self.get_text_size(self.draw, temp_text, font=small_font)
-            bottom_lines.append((temp_text, t_w, t_h))
+            bottom_lines.append((temp_text, t_w, t_h, None))
 
-        if precip is not None and not _is_nan(precip) and int(precip) > 0:
+        if precip is not None and not _is_nan(precip):
             precip_text = f"{int(precip)}%"
             p_w, p_h = self.get_text_size(self.draw, precip_text, font=small_font)
-            bottom_lines.append((precip_text, p_w, p_h))
+            forecast_str = (row.get('shortForecast') or '').lower()
+            is_snow = any(kw in forecast_str for kw in ('snow', 'flurr', 'blizzard', 'sleet', 'wintry'))
+            picdir = Path(__file__).resolve().parent / 'pic'
+            precip_icon = str(picdir / ('wi-snowflake-cold.bmp' if is_snow else 'wi-raindrop.bmp'))
+            bottom_lines.append((precip_text, p_w, p_h, precip_icon))
 
         # Pin block to bottom with 2px margin; never overlap the icon
-        total_h = sum(lh + spacing for _, _, lh in bottom_lines) - spacing
+        total_h = sum(lh + spacing for _, _, lh, _ in bottom_lines) - spacing
         text_y = max(cursor_y, y + h - total_h - 2)
-        for line_text, line_w, line_h in bottom_lines:
-            self.draw.text((int(center_x - line_w // 2), text_y), line_text, font=small_font, fill=0)
+        for line_text, line_w, line_h, icon_path in bottom_lines:
+            if icon_path and os.path.exists(icon_path):
+                try:
+                    orig = Image.open(icon_path)
+                    ow, oh = orig.size
+                    icon_scale = line_h * 2 / oh
+                    icon_w = int(ow * icon_scale)
+                    gap = 2
+                    total_w = icon_w + gap + line_w
+                    start_x = int(center_x - total_w // 2)
+                    self.scale_and_display_bmp(icon_path, position=(max(0, start_x), text_y), scale_factor=icon_scale)
+                    self.draw.text((start_x - 4 + icon_w + gap, text_y), line_text, font=small_font, fill=0)
+                except Exception:
+                    self.draw.text((int(center_x - line_w // 2), text_y), line_text, font=small_font, fill=0)
+            else:
+                self.draw.text((int(center_x - line_w // 2), text_y), line_text, font=small_font, fill=0)
             text_y += line_h + spacing
 
-    def draw_flight_category_bar(self, hourly_df: pd.DataFrame,
-                                  window_start: datetime = None, window_end: datetime = None,
-                                  flight_band_height=40):
+    def _draw_flight_band(self, hourly_df: pd.DataFrame, columns: list,
+                           window_start: datetime, window_end: datetime,
+                           flight_band_height: int, now_utc: datetime):
         top_y = HEIGHT - flight_band_height
         self.draw.line([(0, top_y), (WIDTH, top_y)], fill='black', width=2)
 
-        if hourly_df.empty:
-            return
-
-        now_utc = datetime.now(tz=timezone.utc)
-
-        if window_start is None or window_end is None:
-            future_idx = hourly_df.index[hourly_df.index >= now_utc]
-            if future_idx.empty:
-                return
-            window_start = future_idx[0].to_pydatetime()
-            window_end = (future_idx[-1] + pd.Timedelta(hours=1)).to_pydatetime()
-
-        # Elapsed block: single diagonal-striped rectangle from window_start to now.
-        # Drawn as one shape so there are no gaps even where hourly data is absent.
         now_x = _time_to_x(now_utc, window_start, window_end)
+
+        # Future category fills rendered per column — x-bounds match day column dividers exactly
+        if hourly_df is not None and not hourly_df.empty:
+            for x0, x1, col_start, col_end in columns:
+                col_df = hourly_df[
+                    (hourly_df.index >= max(now_utc, col_start)) &
+                    (hourly_df.index < col_end)
+                ]
+                run_cat = run_rx0 = run_rx1 = None
+                for ts, row in col_df.iterrows():
+                    ts_dt = ts.to_pydatetime()
+                    rx0 = max(x0, _time_to_x(ts_dt, window_start, window_end))
+                    rx1 = min(x1, _time_to_x(ts_dt + timedelta(hours=1), window_start, window_end))
+                    if rx0 >= rx1:
+                        continue
+                    cat = row.get('flightCategory') or 'VFR'
+                    if cat == run_cat:
+                        run_rx1 = rx1
+                    else:
+                        if run_cat is not None:
+                            self._draw_cat_fill(run_cat, run_rx0, run_rx1, top_y)
+                        run_cat, run_rx0, run_rx1 = cat, rx0, rx1
+                if run_cat is not None:
+                    self._draw_cat_fill(run_cat, run_rx0, run_rx1, top_y)
+
+        # Elapsed fill (diagonal stripes) drawn after category fills to cover the past cleanly
         if now_x > 0:
             self._draw_elapsed_fill(0, now_x, top_y)
 
-        # Future hourly fills
-        future_df = hourly_df[
-            (hourly_df.index >= now_utc) & (hourly_df.index < window_end)
-        ]
-        first_future = True
-        for ts, row in future_df.iterrows():
-            ts_dt = ts.to_pydatetime() if hasattr(ts, 'to_pydatetime') else ts
-            x0 = _time_to_x(ts_dt, window_start, window_end)
-            x1 = _time_to_x(ts_dt + timedelta(hours=1), window_start, window_end)
-            if x0 >= x1:
-                continue
-            if not first_future:
-                self.draw.line([(x0, top_y), (x0, HEIGHT)], fill='black', width=1)
-            first_future = False
-            self._draw_cat_fill(row.get('flightCategory') or 'VFR', x0, x1, top_y)
-
-        # "Now" tick: bold vertical line at the current time position
+        # Now tick
         if 0 < now_x < WIDTH:
             self.draw.line([(now_x, top_y - 5), (now_x, HEIGHT)], fill=0, width=3)
 
@@ -539,7 +622,7 @@ class DisplayManager:
         return filename
 
     def draw_current_icon(self, condition: str, station_id: str = "KORH"):
-        icon_path = str(get_icon_path(condition))
+        icon_path = str(get_icon_path(condition, is_night=self._is_night_now()))
 
         korh_w, _ = self.get_text_size(self.draw, station_id, font=self.font35)
 
@@ -559,7 +642,7 @@ class DisplayManager:
         scaled_h = int(oh * scale_factor)
 
         korh_x = 8
-        icon_x = korh_x + max(0, (korh_w - scaled_w) // 2)
+        icon_x = korh_x + max(0, (korh_w - scaled_w) // 2) + 4
         icon_x = max(0, min(icon_x, WIDTH - scaled_w))
 
         try:
@@ -585,10 +668,10 @@ class DisplayManager:
         if left_x is None:
             left_x = margin + 100
         if top_y is None:
-            top_y = 40
+            top_y = 35
 
         right_x = WIDTH - margin - 50
-        bottom_y = 225 - margin
+        bottom_y = 215 - margin
 
         grid_w = right_x - left_x
         grid_h = bottom_y - top_y
@@ -600,7 +683,7 @@ class DisplayManager:
         cell_w = grid_w // cols
         cell_h = grid_h // rows
 
-        ceiling_text = "CLR" if data.ceiling_ft is None else f"{data.ceiling_ft:,}'"
+        ceiling_text = "CLR" if (data.ceiling_ft is None or data.ceiling_ft == float('inf')) else f"{data.ceiling_ft:,}'"
         vis_text = f"{data.visibility_sm} sm" if data.visibility_sm is not None else "N/A"
 
         if data.temp_f is not None:
@@ -610,7 +693,9 @@ class DisplayManager:
             temp_text = "N/A"
 
         wind_parts = []
-        if data.wind_dir_deg is not None:
+        if data.wind_variable:
+            wind_parts.append("VAR")
+        elif data.wind_dir_deg is not None:
             wind_parts.append(f"{data.wind_dir_deg:03d}°")
         if data.wind_speed_kt is not None:
             if data.wind_gust_kt is not None:
@@ -619,7 +704,7 @@ class DisplayManager:
                 wind_parts.append(f"@ {data.wind_speed_kt}")
         wind_text = " ".join(wind_parts) if wind_parts else "N/A"
 
-        altim_text = f"{data.altimeter_inhg:.2f} inHg" if data.altimeter_inhg is not None else "N/A"
+        altim_text = f"{data.altimeter_inhg:.2f}" if data.altimeter_inhg is not None else "N/A"
 
         if data.dewpoint_f is not None and data.temp_f is not None:
             rh = _relative_humidity(data.temp_f, data.dewpoint_f)
@@ -659,15 +744,24 @@ class DisplayManager:
             big = cell['big']
             label = cell['label']
 
-            bw, bh = self.get_text_size(self.draw, big, font=value_font)
-            bx = x0 + (cell_w - bw) // 2
-            by = y0
-            self.draw.text((bx, by), big, font=value_font, fill=0)
+            # Use raw textbbox offsets so visual_gap is the real pixel gap
+            b_bb = self.draw.textbbox((0, 0), big, font=value_font)
+            l_bb = self.draw.textbbox((0, 0), label, font=label_font)
+            b_vis_h = b_bb[3] - b_bb[1]   # actual rendered pixel height of value
+            l_vis_h = l_bb[3] - l_bb[1]   # actual rendered pixel height of label
+            bw = b_bb[2] - b_bb[0]
+            lw = l_bb[2] - l_bb[0]
 
-            lw, lh = self.get_text_size(self.draw, label, font=label_font)
-            lx = x0 + (cell_w - lw) // 2
-            ly = by + bh + 6
-            self.draw.text((lx, ly), label, font=label_font, fill=0)
+            visual_gap = 6
+            total_vis_h = b_vis_h + visual_gap + l_vis_h
+            visual_top = y0 + (cell_h - total_vis_h) // 2
+
+            # Shift anchor so rendered pixels start at visual_top
+            value_y = visual_top - b_bb[1]
+            label_y = visual_top + b_vis_h + visual_gap - l_bb[1]
+
+            self.draw.text((x0 + (cell_w - bw) // 2, value_y), big, font=value_font, fill=0)
+            self.draw.text((x0 + (cell_w - lw) // 2, label_y), label, font=label_font, fill=0)
 
         return {
             'left_x': left_x,

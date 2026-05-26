@@ -45,10 +45,11 @@ def _log_unknown(condition: str) -> None:
         logger.debug(f"Could not write unknown_conditions.log: {e}")
 
 
-def get_icon_path(condition: str) -> Path:
+def get_icon_path(condition: str, is_night: bool = False) -> Path:
     """Return the BMP path for a weather condition string.
 
     Matches by scanning lowercased condition text against ordered keyword rules.
+    When is_night=True, prefers the rule's night_icon over icon if present and on disk.
     Logs unmatched conditions to data/unknown_conditions.log and returns the fallback icon.
     """
     if _rules is None:
@@ -61,6 +62,10 @@ def get_icon_path(condition: str) -> Path:
 
     for entry in _rules:
         if all(kw in lower for kw in entry['match']):
+            if is_night and 'night_icon' in entry:
+                night_path = _PICDIR / entry['night_icon']
+                if night_path.exists():
+                    return night_path
             icon_path = _PICDIR / entry['icon']
             if icon_path.exists():
                 return icon_path

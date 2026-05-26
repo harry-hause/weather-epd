@@ -36,11 +36,18 @@ MAP_PATH = REPO_ROOT / 'display' / 'icon_map.json'
 OUTPUT_WIDTH = 100
 
 
+EXTRA_ICONS = {
+    'wi-raindrop.bmp',    # used as precip indicator in hourly grid
+}
+
+
 def icons_from_map() -> set[str]:
     with open(MAP_PATH) as f:
         data = json.load(f)
     icons = {entry['icon'] for entry in data['rules']}
+    icons.update(entry['night_icon'] for entry in data['rules'] if 'night_icon' in entry)
     icons.add(data.get('fallback', 'wi-cloud.bmp'))
+    icons.update(EXTRA_ICONS)
     return icons
 
 

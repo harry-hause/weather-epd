@@ -1,0 +1,17 @@
+[Unit]
+Description=Weather EPD Display
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/weather-epd
+ExecStart=/home/pi/weather-epd/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
